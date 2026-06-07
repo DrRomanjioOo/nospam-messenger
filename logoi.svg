@@ -1,0 +1,31 @@
+package worker_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/spam"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/worker"
+)
+
+func TestAIPool_Process_PermanentAPIErrorNoBroadcast(t *testing.T) {
+	audit := &mockAudit{}
+	bc := &mockBroadcast{}
+	pool := worker.NewAIPool(1, 4, &mockClassifier{
+		fn: func(ctx context.Context, text string) (bool, string, error) {
+			return false, `{"error":"bad key"}`, &spam.APIError{StatusCode: 403, Body: "forbidden"}
+		},
+	}, audit, &mockUpdater{}, bc, time.Millisecond, "m")
+
+	pool.ProcessForTest(context.Background(), worker.Job{MessageID: 7, Content: "buy now"})
+
+	if len(audit.inserts) != 1 || audit.inserts[0].Verdict != "error" {
+		t.Fatalf("audit=%+v", audit.inserts)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.msgs) != 0 {
+		t.Fatalf("unexpected broadcast on permanent error: %+v", bc.msgs)
+	}
+}

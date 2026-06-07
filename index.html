@@ -1,0 +1,49 @@
+package spam_test
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/spam"
+)
+
+func TestRuleChecker_Check(t *testing.T) {
+	t.Parallel()
+	checker := spam.NewRuleChecker([]string{"badword", "сука"})
+
+	tests := []struct {
+		name    string
+		content string
+		wantErr error
+	}{
+		{"ok", "Hello world", nil},
+		{"empty", "   ", spam.ErrSpamRule},
+		{"stop word latin", "you are badword here", spam.ErrSpamRule},
+		{"stop word cyrillic", "ты сука", spam.ErrSpamRule},
+		{"repeated", strings.Repeat("a", 8), spam.ErrSpamRule},
+		{"symbols only", "!!!!@@@@", spam.ErrSpamRule},
+		{"short ok", "abc", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checker.Check(tt.content)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewRuleChecker_SkipsEmptyWords(t *testing.T) {
+	c := spam.NewRuleChecker([]string{"", "  "})
+	if err := c.Check("totally fine message"); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}

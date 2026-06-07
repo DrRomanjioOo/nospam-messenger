@@ -1,0 +1,127 @@
+package testutil
+
+import (
+	"context"
+
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/domain"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/repository"
+)
+
+type MockUserStore struct {
+	CreateFn    func(ctx context.Context, login, passwordHash string) (domain.User, error)
+	GetByLoginFn func(ctx context.Context, login string) (domain.User, string, error)
+	GetByIDFn   func(ctx context.Context, id int64) (domain.User, error)
+}
+
+func (m *MockUserStore) Create(ctx context.Context, login, passwordHash string) (domain.User, error) {
+	return m.CreateFn(ctx, login, passwordHash)
+}
+func (m *MockUserStore) GetByLogin(ctx context.Context, login string) (domain.User, string, error) {
+	return m.GetByLoginFn(ctx, login)
+}
+func (m *MockUserStore) GetByID(ctx context.Context, id int64) (domain.User, error) {
+	return m.GetByIDFn(ctx, id)
+}
+
+type MockSessionStore struct {
+	CreateFn func(ctx context.Context, userID int64, login string) (string, error)
+	GetFn    func(ctx context.Context, id string) (repository.SessionData, error)
+	TouchFn  func(ctx context.Context, id string) error
+	DeleteFn func(ctx context.Context, id string) error
+}
+
+func (m *MockSessionStore) Create(ctx context.Context, userID int64, login string) (string, error) {
+	return m.CreateFn(ctx, userID, login)
+}
+func (m *MockSessionStore) Get(ctx context.Context, id string) (repository.SessionData, error) {
+	return m.GetFn(ctx, id)
+}
+func (m *MockSessionStore) Touch(ctx context.Context, id string) error {
+	return m.TouchFn(ctx, id)
+}
+func (m *MockSessionStore) Delete(ctx context.Context, id string) error {
+	return m.DeleteFn(ctx, id)
+}
+
+type MockMessageStore struct {
+	CreateFn           func(ctx context.Context, userID int64, content string) (domain.Message, error)
+	GetByIDFn          func(ctx context.Context, id int64) (domain.Message, error)
+	ListFn             func(ctx context.Context, beforeID int64, limit int) ([]domain.Message, error)
+	SoftDeleteByUserFn func(ctx context.Context, id, userID int64) (domain.Message, error)
+	SoftDeleteByAIFn   func(ctx context.Context, id int64) (domain.Message, error)
+	AttachAuthorFn     func(ctx context.Context, m domain.Message) (domain.Message, error)
+}
+
+func (m *MockMessageStore) Create(ctx context.Context, userID int64, content string) (domain.Message, error) {
+	return m.CreateFn(ctx, userID, content)
+}
+func (m *MockMessageStore) GetByID(ctx context.Context, id int64) (domain.Message, error) {
+	return m.GetByIDFn(ctx, id)
+}
+func (m *MockMessageStore) List(ctx context.Context, beforeID int64, limit int) ([]domain.Message, error) {
+	return m.ListFn(ctx, beforeID, limit)
+}
+func (m *MockMessageStore) SoftDeleteByUser(ctx context.Context, id, userID int64) (domain.Message, error) {
+	return m.SoftDeleteByUserFn(ctx, id, userID)
+}
+func (m *MockMessageStore) SoftDeleteByAI(ctx context.Context, id int64) (domain.Message, error) {
+	return m.SoftDeleteByAIFn(ctx, id)
+}
+func (m *MockMessageStore) AttachAuthor(ctx context.Context, msg domain.Message) (domain.Message, error) {
+	return m.AttachAuthorFn(ctx, msg)
+}
+
+type MockRateLimiter struct {
+	AllowFn func(ctx context.Context, userID int64) (bool, error)
+}
+
+func (m *MockRateLimiter) AllowMessage(ctx context.Context, userID int64) (bool, error) {
+	return m.AllowFn(ctx, userID)
+}
+
+type MockAIEnqueuer struct {
+	EnqueueFn func(messageID int64, content string)
+}
+
+func (m *MockAIEnqueuer) Enqueue(messageID int64, content string) {
+	m.EnqueueFn(messageID, content)
+}
+
+type MockAuthAPI struct {
+	RegisterFn       func(ctx context.Context, login, password string) (domain.User, string, error)
+	LoginFn          func(ctx context.Context, login, password string) (domain.User, string, error)
+	ResolveSessionFn func(ctx context.Context, sessionID string) (repository.SessionData, error)
+}
+
+func (m *MockAuthAPI) Register(ctx context.Context, login, password string) (domain.User, string, error) {
+	return m.RegisterFn(ctx, login, password)
+}
+func (m *MockAuthAPI) Login(ctx context.Context, login, password string) (domain.User, string, error) {
+	return m.LoginFn(ctx, login, password)
+}
+func (m *MockAuthAPI) ResolveSession(ctx context.Context, sessionID string) (repository.SessionData, error) {
+	return m.ResolveSessionFn(ctx, sessionID)
+}
+
+type MockMessageAPI struct {
+	ListFn         func(ctx context.Context, beforeID int64, limit int) ([]domain.Message, error)
+	SendFn         func(ctx context.Context, userID int64, login, content string) (domain.Message, error)
+	GetFn          func(ctx context.Context, id int64) (domain.Message, error)
+	DeleteByUserFn func(ctx context.Context, messageID, userID int64) (domain.Message, error)
+}
+
+func (m *MockMessageAPI) List(ctx context.Context, beforeID int64, limit int) ([]domain.Message, error) {
+	return m.ListFn(ctx, beforeID, limit)
+}
+func (m *MockMessageAPI) Send(ctx context.Context, userID int64, login, content string) (domain.Message, error) {
+	return m.SendFn(ctx, userID, login, content)
+}
+func (m *MockMessageAPI) Get(ctx context.Context, id int64) (domain.Message, error) {
+	if m.GetFn != nil {
+		return m.GetFn(ctx, id)
+	}
+	return domain.Message{}, nil
+}
+func (m *MockMessageAPI) DeleteByUser(ctx context.Context, messageID, userID int64) (domain.Message, error) {
+	return m.DeleteByUserFn(ctx, messageID, userID)
+}

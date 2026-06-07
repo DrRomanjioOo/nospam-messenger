@@ -1,0 +1,148 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/config"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/handler"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/middleware"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/repository"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/service"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/spam"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/worker"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/internal/ws"
+	"gitlab.com/noname-group7630520/nospam-messenger/backend/migrate"
+)
+
+const sessionCookie = "session_id"
+
+type health struct {
+	pg  *repository.Postgres
+	rdb *redis.Client
+}
+
+func (h health) PingPostgres(r *http.Request) error {
+	return h.pg.Ping(r.Context())
+}
+
+func (h health) PingRedis(r *http.Request) error {
+	return h.rdb.Ping(r.Context()).Err()
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := migrate.Up(cfg.DatabaseURL); err != nil {
+		slog.Error("migrate", "err", err)
+		os.Exit(1)
+	}
+
+	pg, err := repository.NewPostgres(ctx, cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("postgres", "err", err)
+		os.Exit(1)
+	}
+	defer pg.Close()
+
+	opt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		slog.Error("redis url", "err", err)
+		os.Exit(1)
+	}
+	rdb := redis.NewClient(opt)
+	defer rdb.Close()
+
+	userRepo := repository.NewUserRepository(pg)
+	msgRepo := repository.NewMessageRepository(pg)
+	sessionRepo := repository.NewSessionRepository(rdb, cfg.SessionTTL)
+	rateRepo := repository.NewRateLimitRepository(rdb)
+	auditRepo := repository.NewSpamAuditRepository(pg)
+
+	authSvc := service.NewAuthService(userRepo, sessionRepo, cfg.BcryptCost)
+	rules := spam.NewRuleChecker(cfg.StopWords)
+	openrouter := spam.NewOpenRouterClient(cfg.OpenRouterAPIKey, cfg.OpenRouterModel, cfg.OpenRouterSpamPrompt)
+
+	var classifier worker.SpamClassifier = openrouter
+	if openrouter.Enabled() {
+		slog.Info("AI moderation enabled", "provider", "openrouter", "model", cfg.OpenRouterModel)
+	} else if cfg.OpenRouterAPIKey != "" {
+		slog.Warn("OPENROUTER_API_KEY is set but invalid (expected key starting with sk-or-v1-); AI moderation disabled")
+		classifier = spam.NoopClassifier{}
+	} else {
+		slog.Warn("OPENROUTER_API_KEY not set; AI moderation disabled")
+		classifier = spam.NoopClassifier{}
+	}
+
+	hub := ws.NewHub()
+
+	msgSvc := service.NewMessageService(msgRepo, rateRepo, rules, nil)
+	aiPool := worker.NewAIPool(
+		cfg.AIWorkerCount,
+		cfg.AIQueueSize,
+		classifier,
+		auditRepo,
+		msgSvc,
+		hub,
+		cfg.AIRetryDelay,
+		cfg.OpenRouterModel,
+	)
+	msgSvc.SetAIPool(aiPool)
+	aiPool.Start(ctx, cfg.AIWorkerCount)
+
+	authH := handler.NewAuthHandler(authSvc, sessionCookie, cfg.CookieSecure, cfg.SessionTTL)
+	msgH := handler.NewMessageHandler(msgSvc, hub)
+	corsOrigins := middleware.ParseAllowedOrigins(cfg.CORSOrigin)
+	wsH := handler.NewWSHandler(hub, authSvc, msgSvc, corsOrigins)
+	healthH := handler.NewHealthHandler(health{pg: pg, rdb: rdb})
+
+	mux := http.NewServeMux()
+	authed := middleware.RequireSession(authSvc, sessionCookie)
+
+	mux.HandleFunc("GET /health", healthH.Serve)
+	mux.HandleFunc("POST /auth/register", authH.Register)
+	mux.HandleFunc("POST /auth/login", authH.Login)
+	mux.Handle("GET /auth/me", authed(http.HandlerFunc(authH.Me)))
+	mux.Handle("POST /auth/logout", authed(http.HandlerFunc(authH.Logout)))
+	mux.Handle("GET /messages", authed(http.HandlerFunc(msgH.List)))
+	mux.HandleFunc("GET /ws", wsH.Serve)
+	mux.Handle("POST /messages", authed(http.HandlerFunc(msgH.Send)))
+	mux.Handle("DELETE /messages/{id}", authed(http.HandlerFunc(msgH.Delete)))
+
+	root := middleware.CORS(corsOrigins)(middleware.Logging(mux))
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           root,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		slog.Info("server listening", "addr", cfg.HTTPAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("listen", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+	slog.Info("shutdown complete")
+}

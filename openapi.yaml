@@ -1,0 +1,103 @@
+package spam
+
+import (
+	"errors"
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+var (
+	ErrSpamRule      = errors.New("spam_rule")
+	ErrRateLimited   = errors.New("rate_limited")
+)
+
+type RuleChecker struct {
+	stopWords []*regexp.Regexp
+}
+
+func NewRuleChecker(words []string) *RuleChecker {
+	patterns := make([]*regexp.Regexp, 0, len(words))
+	for _, w := range words {
+		w = strings.TrimSpace(strings.ToLower(w))
+		if w == "" {
+			continue
+		}
+		// Word boundary match (latin + cyrillic letters).
+		p := `(?i)(?:^|[^\p{L}])` + regexp.QuoteMeta(w) + `(?:[^\p{L}]|$)`
+		if re, err := regexp.Compile(p); err == nil {
+			patterns = append(patterns, re)
+		}
+	}
+	return &RuleChecker{stopWords: patterns}
+}
+
+func (c *RuleChecker) Check(content string) error {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ErrSpamRule
+	}
+	lower := strings.ToLower(trimmed)
+	for _, re := range c.stopWords {
+		if re.MatchString(lower) {
+			return ErrSpamRule
+		}
+	}
+	if isMeaningless(trimmed) {
+		return ErrSpamRule
+	}
+	return nil
+}
+
+func isMeaningless(s string) bool {
+	if len(s) < 6 {
+		return false
+	}
+	// Same character repeated.
+	if allSameRunes(s) {
+		return true
+	}
+	// Mostly non-letter symbols.
+	letters := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	if letters == 0 {
+		return true
+	}
+	if float64(letters)/float64(len([]rune(s))) < 0.3 {
+		return true
+	}
+	// Long consonant-only latin noise.
+	if len(s) >= 12 && !hasVowel(s) {
+		return true
+	}
+	return false
+}
+
+func allSameRunes(s string) bool {
+	runes := []rune(s)
+	if len(runes) < 6 {
+		return false
+	}
+	first := runes[0]
+	for _, r := range runes[1:] {
+		if r != first {
+			return false
+		}
+	}
+	return true
+}
+
+func hasVowel(s string) bool {
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case 'a', 'e', 'i', 'o', 'u', 'y',
+			'а', 'е', 'ё', 'и', 'о', 'у', 'ы', 'э', 'ю', 'я':
+			return true
+		}
+	}
+	return false
+}
